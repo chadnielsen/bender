@@ -1,0 +1,147 @@
+#!/bin/bash
+
+# Bender
+# Written by Chad Nielsen
+# Forget Computers, Get Creative!
+
+# Version History
+# 1.0 - Initial creation of script for use with a companion launch daemon.
+
+################################## VARIABLE DEFINITIONS ################################# 
+#########################################################################################
+
+host=$(hostname)
+os=$(sw_vers | grep ProductVersion | awk '{print substr($2,1,4)}' | tr -d ".")
+snum=`system_profiler SPHardwareDataType | grep "Serial Number (system):" | awk '{print $4}'`
+date=$(date +%Y-%m-%d-%H%M)
+pass=$(/sbin/ifconfig | /usr/bin/grep -m 1 ether | /usr/bin/awk '{print $2}' | /usr/bin/sed 's/://g' | /usr/bin/cut -c 5-)
+/bin/mkdir -p /Backups/$date
+dst="/Backups/$date"
+keepUntil="14"
+
+##################################### SCRIPT BEGINS ##################################### 
+#########################################################################################
+
+function logEvent () {
+	# Ensure the log file is present.
+	/bin/mkdir -p "/Library/Application Support/RobotCloud/Logs"
+	if [ ! -e "/Library/Application Support/RobotCloud/Logs/bender.log" ]; then
+		/usr/bin/touch "/Library/Application Support/RobotCloud/Logs/bender.log"
+	fi
+	logFile="/Library/Application Support/RobotCloud/Logs/bender.log"
+	# Echo the passed event and then write it to the log.
+	echo $1
+	echo $(date "+%Y-%m-%d %H:%M:%S: ") ["bender"] $1 >> "$logFile"
+}
+
+function rmbackup () {
+	# Remove backups that are older than 14 days.
+	logEvent "[ maintenance ] Pruning files in $1 older than 14 days."
+	find /Backups -mtime +14 -exec rm -rf {} \;
+}
+
+function sendAlert {
+	# Copy the contents of the log to a variable for submission.
+	log=`cat "$logFile"`
+	# Ensure that scroobiuspip is installed.
+	if [ ! -f /bin/scroobiuspip ]; then
+		logEvent "[ framework ] Installing scroobiuspip…"
+		sudo jamf policy -trigger pip
+		# If pip is unable to be installed, add this info so it can be seen in the JSS.
+		if [ "$?" = "1" ]; then
+			logEvent "[ error ] Intallation failed. No alert sent."
+		else
+			logEvent "[ framework ] Installation successful."
+		fi
+	else
+		logEvent "[ framework ] The scroobiuspip binary has been found."
+	fi
+	# Send the email to Zendesk.
+	logEvent ""
+	/bin/scroobiuspip "Bender Backup Error on: $snum" "$log"
+	# If the email was unable to send
+	if [ "$?" = "1" ]; then
+		logEvent "[ error ] There was an error sending the alert."
+	else
+		logEvent "[ framework ] Successfully sent alert."
+	fi
+}
+
+function checkos () {
+	# Set the serveradmin variable according to operating system.
+	if [ "$os" = "108" ]; then
+		if [ -e /Applications/Server.app/Contents/ServerRoot/usr/sbin/serveradmin ]; then
+			serveradmin="/Applications/Server.app/Contents/ServerRoot/usr/sbin/serveradmin"
+			logEvent "[ check ] The serveradmin binary has been found."
+		else
+			logEvent "[ error ] The serveradmin binary could not be found. Exit Code: $?"
+			exit 1
+		fi
+	elif [ -e /usr/sbin/serveradmin ]; then
+		serveradmin="/usr/sbin/serveradmin"
+		logEvent "[ check ] The serveradmin binary has been found."
+	else
+		logEvent "[ error ] The serveradmin binary could not be found. Exit Code: $?"
+		exit 1
+	fi
+}
+
+function odbackup () {
+	# Check to see if Open Directory service is running.
+	odstatus=$(sudo $serveradmin status dirserv | grep -c "RUNNING")
+	if [ $odstatus = 1 ]; then
+		# Check to see if Open Directory is set to Master.
+		odmaster=$(sudo $serveradmin settings dirserv | grep "LDAPServerType" | grep -c "master")
+		if [ $odmaster = 1 ]; then
+			logEvent "[ check ] Open Directory is running and is set to master."
+			# Ensure the backup directory is present and assign the path as a variable.
+			/bin/mkdir -p $dst/OpenDirectory
+			# Instruct the serveradmin binary to create a backup.
+			$serveradmin command <<-EOC
+				dirserv:backupArchiveParams:archivePassword = $pass
+				dirserv:backupArchiveParams:archivePath = ${dst}/OpenDirectory/od_backup-${host}-${date}.sparseimage
+				dirserv:command = backupArchive
+
+				EOC
+			# Check to see if there were any errors backing up Open Directory.
+			if [ $? == 0 ]; then
+				logEvent "[ backup ] Open Directory successfully backed up."
+			else
+				logEvent "[ error ] There was an error attempting to back up Open Directory. Exit Code: $?"
+			fi
+		else
+			logEvent "[ check ] Open Directory not set to master. No backup required."
+		fi
+	else
+		logEvent "[ check ] Open Directory is not running. No backup required."
+	fi			
+}
+
+function sabackup () {
+	# Ensure the backup directory is present and assign the path as a variable.
+	/bin/mkdir -p $dst/ServerAdmin
+	# Create a backup of all services, regardless if they are running or not.
+	sudo $serveradmin settings all -x > $dst/ServerAdmin/sa_backup-allservices-$host-$date.plist
+	list=$(sudo $serveradmin list)
+	for service in $list; do
+	 	sudo $serveradmin settings $service -x > $dst/ServerAdmin/sa_backup-$service-$host-$date.plist
+		if [ $? == 0 ]; then
+			logEvent "[ backup ] $service successfully backed up."
+		else
+			logEvent "[ error ] Could not back up $service. Exit Code: $?"
+		fi
+	done
+}
+
+##################################### FUNCTION CALL ##################################### 
+#########################################################################################
+
+logEvent "===========================[ Bender is Bending… ]==========================="
+checkos
+odbackup
+sabackup
+rmbackup
+logEvent "==========================[ Bender has completed ]=========================="
+logEvent ""
+
+exit 0

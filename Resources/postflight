@@ -1,0 +1,5 @@
+#!/bin/sh
+
+sudo launchctl load /Library/LaunchDaemons/net.robotcloud.bender.plist 
+
+exit 0
