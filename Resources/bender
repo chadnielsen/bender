@@ -1,147 +1,241 @@
 #!/bin/bash
-
+ 
 # Bender
 # Written by Chad Nielsen
 # Forget Computers, Get Creative!
-
+ 
 # Version History
 # 1.0 - Initial creation of script for use with a companion launch daemon.
-
+# 1.1 - Moved binary and log locations to /usr/local/robotcloud.
+# 1.2 - Code improvements and added compatibility with OS X 10.9 Mavericks.
+# 2.0 - postgres backup for profilemanager added by Adrian Burgess
+# 2.1 - Added --version flag code.
+# https://gist.github.com/anotherspot/9145864
+ 
 ################################## VARIABLE DEFINITIONS ################################# 
 #########################################################################################
-
+ 
 host=$(hostname)
-os=$(sw_vers | grep ProductVersion | awk '{print substr($2,1,4)}' | tr -d ".")
-snum=`system_profiler SPHardwareDataType | grep "Serial Number (system):" | awk '{print $4}'`
+macOS=$(sw_vers | awk '/ProductVersion/{print substr($2,1,4)}' | tr -d ".")
+macSN=$(system_profiler SPHardwareDataType | awk '/Serial Number/{print $4}')
 date=$(date +%Y-%m-%d-%H%M)
-pass=$(/sbin/ifconfig | /usr/bin/grep -m 1 ether | /usr/bin/awk '{print $2}' | /usr/bin/sed 's/://g' | /usr/bin/cut -c 5-)
-/bin/mkdir -p /Backups/$date
-dst="/Backups/$date"
+pass=$(system_profiler SPHardwareDataType | awk '/Hardware UUID/{print $3}')
+logPath="/usr/local/robotcloud/logs/bender.log"
+pipPath="/usr/local/robotcloud/bin/scroobiuspip"
+pipTitle="Bender Backup Error on: $macSN"
+backupDestination="/Backups/$date"
 keepUntil="14"
-
+version="2.1"
+versionCheck="$1"
+ 
 ##################################### SCRIPT BEGINS ##################################### 
 #########################################################################################
+ 
+function CheckVersion {
+	# If a version check is passed to monitor, respond with version but do not run.
+	if [ "$versionCheck" = "--version" ]; then
+		echo "$version"
+	elif [ "$versionCheck" != "" ]; then
+		echo "Unknown string passed to binary."
+	else
+		RobotCloudStructure
+		LogEvent "===========================[ Bender is Bending... ]==========================="
+		CheckOS
+		OpenDirectoryBackup
+		ServerAdminBackup
+		ProfileManagerBackup
+		WikiDBBackup
+		WikiFilesBackup
+		RemoveOldBackups
+		LogEvent "==========================[ Bender has completed ]=========================="
+		LogEvent ""
+	fi
+}
 
-function logEvent () {
+function RobotCloudStructure {
+	# Ensure the appropriate directories are in place to generate a log and alert.
+	mkdir -p /usr/local/robotcloud/{bin,data,logs}
 	# Ensure the log file is present.
-	/bin/mkdir -p "/Library/Application Support/RobotCloud/Logs"
-	if [ ! -e "/Library/Application Support/RobotCloud/Logs/bender.log" ]; then
-		/usr/bin/touch "/Library/Application Support/RobotCloud/Logs/bender.log"
+	if [ ! -e "$logPath" ]; then
+		/usr/bin/touch "$logPath"
 	fi
-	logFile="/Library/Application Support/RobotCloud/Logs/bender.log"
-	# Echo the passed event and then write it to the log.
-	echo $1
-	echo $(date "+%Y-%m-%d %H:%M:%S: ") ["bender"] $1 >> "$logFile"
+	# Create a new backup destination folder with the execution date.
+	/bin/mkdir -p "$backupDestination"
 }
-
-function rmbackup () {
-	# Remove backups that are older than 14 days.
-	logEvent "[ maintenance ] Pruning files in $1 older than 14 days."
-	find /Backups -mtime +14 -exec rm -rf {} \;
-}
-
-function sendAlert {
-	# Copy the contents of the log to a variable for submission.
-	log=`cat "$logFile"`
-	# Ensure that scroobiuspip is installed.
-	if [ ! -f /bin/scroobiuspip ]; then
-		logEvent "[ framework ] Installing scroobiuspip…"
-		sudo jamf policy -trigger pip
-		# If pip is unable to be installed, add this info so it can be seen in the JSS.
-		if [ "$?" = "1" ]; then
-			logEvent "[ error ] Intallation failed. No alert sent."
-		else
-			logEvent "[ framework ] Installation successful."
-		fi
-	else
-		logEvent "[ framework ] The scroobiuspip binary has been found."
-	fi
-	# Send the email to Zendesk.
-	logEvent ""
-	/bin/scroobiuspip "Bender Backup Error on: $snum" "$log"
-	# If the email was unable to send
-	if [ "$?" = "1" ]; then
-		logEvent "[ error ] There was an error sending the alert."
-	else
-		logEvent "[ framework ] Successfully sent alert."
-	fi
-}
-
-function checkos () {
+ 
+function CheckOS {
 	# Set the serveradmin variable according to operating system.
-	if [ "$os" = "108" ]; then
+	if [ "$macOS" -ge "108" ]; then
+		if [ "$macOS" -ge "109" ]; then
+			SOCKET="/Library/Server/ProfileManager/Config/var/PostgreSQL" 
+			WIKISOCKET="/Library/Server/Wiki/PostgresSocket" 
+			DATABASE=devicemgr_v2m0 
+			WIKIDATABASE=collab 
+		else
+			SOCKET="/Library/Server/PostgreSQL For Server Services/Socket"
+			WIKISOCKET="/Library/Server/PostgreSQL For Server Services/Socket" 
+			DATABASE=device_management
+			WIKIDATABASE=collab
+		fi
 		if [ -e /Applications/Server.app/Contents/ServerRoot/usr/sbin/serveradmin ]; then
 			serveradmin="/Applications/Server.app/Contents/ServerRoot/usr/sbin/serveradmin"
-			logEvent "[ check ] The serveradmin binary has been found."
+			SERVERROOT="/Applications/Server.app/Contents/ServerRoot/usr/bin"
+			LogEvent "[ check ] The serveradmin binary has been found."
 		else
-			logEvent "[ error ] The serveradmin binary could not be found. Exit Code: $?"
+			LogEvent "[ error ] The serveradmin binary could not be found. Exit Code: $?"
 			exit 1
 		fi
 	elif [ -e /usr/sbin/serveradmin ]; then
 		serveradmin="/usr/sbin/serveradmin"
-		logEvent "[ check ] The serveradmin binary has been found."
+		LogEvent "[ check ] The serveradmin binary has been found."
 	else
-		logEvent "[ error ] The serveradmin binary could not be found. Exit Code: $?"
+		LogEvent "[ error ] The serveradmin binary could not be found. Exit Code: $?"
+		SendAlert
 		exit 1
 	fi
 }
-
-function odbackup () {
+ 
+function OpenDirectoryBackup {
 	# Check to see if Open Directory service is running.
-	odstatus=$(sudo $serveradmin status dirserv | grep -c "RUNNING")
-	if [ $odstatus = 1 ]; then
+	obackupDestinationatus=$(sudo $serveradmin status dirserv | grep -c "RUNNING")
+	if [ $obackupDestinationatus = 1 ]; then
 		# Check to see if Open Directory is set to Master.
 		odmaster=$(sudo $serveradmin settings dirserv | grep "LDAPServerType" | grep -c "master")
 		if [ $odmaster = 1 ]; then
-			logEvent "[ check ] Open Directory is running and is set to master."
+			LogEvent "[ check ] Open Directory is running and is set to master."
 			# Ensure the backup directory is present and assign the path as a variable.
-			/bin/mkdir -p $dst/OpenDirectory
+			/bin/mkdir -p $backupDestination/OpenDirectory
 			# Instruct the serveradmin binary to create a backup.
 			$serveradmin command <<-EOC
 				dirserv:backupArchiveParams:archivePassword = $pass
-				dirserv:backupArchiveParams:archivePath = ${dst}/OpenDirectory/od_backup-${host}-${date}.sparseimage
+				dirserv:backupArchiveParams:archivePath = ${backupDestination}/OpenDirectory/od_backup-${host}-${date}.sparseimage
 				dirserv:command = backupArchive
-
+ 
 				EOC
 			# Check to see if there were any errors backing up Open Directory.
 			if [ $? == 0 ]; then
-				logEvent "[ backup ] Open Directory successfully backed up."
+				LogEvent "[ backup ] Open Directory successfully backed up."
 			else
-				logEvent "[ error ] There was an error attempting to back up Open Directory. Exit Code: $?"
+				LogEvent "[ error ] There was an error attempting to back up Open Directory. Exit Code: $?"
+				SendAlert
+				exit 1
 			fi
 		else
-			logEvent "[ check ] Open Directory not set to master. No backup required."
+			LogEvent "[ check ] Open Directory not set to master. No backup required."
 		fi
 	else
-		logEvent "[ check ] Open Directory is not running. No backup required."
+		LogEvent "[ check ] Open Directory is not running. No backup required."
 	fi			
 }
-
-function sabackup () {
+ 
+function ServerAdminBackup () {
 	# Ensure the backup directory is present and assign the path as a variable.
-	/bin/mkdir -p $dst/ServerAdmin
+	/bin/mkdir -p $backupDestination/ServerAdmin
 	# Create a backup of all services, regardless if they are running or not.
-	sudo $serveradmin settings all -x > $dst/ServerAdmin/sa_backup-allservices-$host-$date.plist
+	sudo $serveradmin settings all -x > $backupDestination/ServerAdmin/sa_backup-allservices-$host-$date.plist
 	list=$(sudo $serveradmin list)
 	for service in $list; do
-	 	sudo $serveradmin settings $service -x > $dst/ServerAdmin/sa_backup-$service-$host-$date.plist
+	 	sudo $serveradmin settings $service -x > $backupDestination/ServerAdmin/sa_backup-$service-$host-$date.plist
 		if [ $? == 0 ]; then
-			logEvent "[ backup ] $service successfully backed up."
+			LogEvent "[ backup ] $service successfully backed up."
 		else
-			logEvent "[ error ] Could not back up $service. Exit Code: $?"
+			LogEvent "[ error ] Could not back up $service. Exit Code: $?"
+			SendAlert
+			exit 1
 		fi
 	done
 }
-
+ 
+function ProfileManagerBackup () {
+	# Ensure the backup directory is present and assign the path as a variable.
+	/bin/mkdir -p $backupDestination/ProfileManager
+	# Create a backup of profilemanager database.
+	sudo $SERVERROOT/pg_dump -v -h $SOCKET --format=c --compress=9 --blobs --username=_devicemgr --file=$backupDestination/ProfileManager/device_management-$host-$date.pgdump $DATABASE
+		if [ $? == 0 ]; then
+			LogEvent "[ backup ] ProfileManager successfully backed up."
+		else
+			LogEvent "[ error ] Could not back up ProfileManager. Exit Code: $?"
+			SendAlert
+			exit 1
+		fi
+}
+ 
+function WikiDBBackup () {
+	# Ensure the backup directory is present and assign the path as a variable.
+	/bin/mkdir -p $backupDestination/WikiDB
+	# Create a backup of Wiki database.
+	sudo $SERVERROOT/pg_dump -v -h $WIKISOCKET --format=c --compress=9 --blobs --username=collab --file=$backupDestination/WikiDB/collab-$host-$date.pgdump $WIKIDATABASE
+		if [ $? == 0 ]; then
+			LogEvent "[ backup ] Wiki Database successfully backed up."
+		else
+			LogEvent "[ error ] Could not back up Wiki Database. Exit Code: $?"
+			SendAlert
+			exit 1
+		fi
+}
+ 
+function WikiFilesBackup () {
+	# Ensure the backup directory is present and assign the path as a variable.
+	/bin/mkdir -p $backupDestination/WikiFiles
+	# Create a backup of Wiki Files.
+	sudo rsync -axv /Library/Server/Wiki/FileData $backupDestination/WikiFiles/
+		if [ $? == 0 ]; then
+			LogEvent "[ backup ] Wiki Files successfully backed up."
+		else
+			LogEvent "[ error ] Could not back up Wiki Files. Exit Code: $?"
+			SendAlert
+			exit 1
+		fi
+	sudo chown -R root:admin $backupDestination/WikiFiles/
+	sudo chmod -R 770 $backupDestination/WikiFiles/
+}
+ 
+ 
+ 
+function LogEvent () {
+	# Echo the passed event and then write it to the log.
+	echo $1
+	echo $(date "+%Y-%m-%d %H:%M:%S: ") ["bender"] $1 >> "$logPath"
+}
+ 
+function RemoveOldBackups () {
+	# Remove backups that are older than 14 days.
+	LogEvent "[ maintenance ] Pruning files in $1 older than 14 days."
+	find /Backups -mtime +$keepUntil -exec rm -rf {} \;
+}
+ 
+function SendAlert {
+	# Copy the contents of the log to a variable for submission.
+	pipDescription=$(cat "$logPath")
+	# Ensure that scroobiuspip is installed.
+	# This alerting binary is used by Forget Computers.
+	# You can modify this area to send alerts using your preferred methods.
+	if [ ! -f "$pipPath" ]; then
+		LogEvent "[ framework ] Installing scroobiuspip..."
+		sudo jamf policy -trigger pip
+		# If pip is unable to be installed, add this info so it can be seen in the JSS.
+		if [ "$?" = "1" ]; then
+			LogEvent "[ error ] Intallation failed. No alert sent."
+		else
+			LogEvent "[ framework ] Installation successful."
+		fi
+	else
+		LogEvent "[ framework ] The scroobiuspip binary has been found."
+	fi
+	# Send the email to Zendesk.
+	LogEvent ""
+	"$pipPath" "$pipTitle" "$pipDescription"
+	# If the email was unable to send
+	if [ "$?" = "1" ]; then
+		LogEvent "[ error ] There was an error sending the alert."
+	else
+		LogEvent "[ framework ] Successfully sent alert."
+	fi
+}
+ 
 ##################################### FUNCTION CALL ##################################### 
 #########################################################################################
-
-logEvent "===========================[ Bender is Bending… ]==========================="
-checkos
-odbackup
-sabackup
-rmbackup
-logEvent "==========================[ Bender has completed ]=========================="
-logEvent ""
-
+ 
+CheckVersion
+ 
 exit 0
