@@ -1,0 +1,207 @@
+#!/bin/bash
+ 
+# Bender
+# Written by Robot Cloud
+# http://www.forgetcomputers.com/robot-cloud
+ 
+# Version History
+# 1.0 - Initial creation of script for use with a companion launch daemon.
+# 1.1 - Moved binary and log locations to /usr/local/robotcloud.
+# 1.2 - Code improvements and added compatibility with OS X 10.9 Mavericks.
+# 2.0 - postgres backup for profilemanager added by Adrian Burgess
+# 2.1 - Added --version flag code.
+# 2.2 - Changed to straight serveradmin dump instead of xml for better restores.
+# 2.3 - Yosemite 10.10 compatibility.
+# 2.4 - Fixed backup pruning older WikiFiles, removed scroobiuspip alerting.
+# 2.5 - Added safetynet for external volume in case Bender is customized.
+# 2.6 - Changed how Profile Manager and Wiki are backed up, increased keep until 30 days.
+# 2.7 - Fixed bug where Profile Manager could not back up when run from launchd.
+ 
+################################## VARIABLE DEFINITIONS ################################# 
+#########################################################################################
+ 
+host=$(hostname)
+macOS=$(sw_vers | awk '/ProductVersion/{print substr($2,1,5)}' | tr -d ".")
+date=$(date +%Y-%m-%d-%H%M)
+ldapPass=$(system_profiler SPHardwareDataType | awk '/Hardware UUID/{print $3}')
+pathBackups=""
+backupDestination="/Bender Backups/$date"
+pathLog="/usr/local/robotcloud/logs/Bender.log"
+keepUntil="30"
+version="2.7"
+versionCheck="$1"
+ 
+##################################### SCRIPT BEGINS ##################################### 
+#########################################################################################
+ 
+function CheckVersion {
+	# If a version check is passed to monitor, respond with version but do not run.
+	if [ "$versionCheck" = "--version" ]; then
+		echo "$version"
+	elif [ "$versionCheck" != "" ]; then
+		echo "Unknown string passed to binary."
+	else
+		RobotCloudStructure
+		LogEvent "===========================[ Bender is Bending... ]==========================="
+		CheckOS
+		OpenDirectoryBackup
+		ServerAdminBackup
+		if [ `"$serveradmin" status devicemgr | grep -c "RUNNING"` = "1" ]; then
+			ProfileManagerBackup
+		fi
+		if [ `"$serveradmin" status wiki | grep -c "RUNNING"` = "1" ]; then
+			WikiBackup
+		fi
+		RemoveOldBackups
+		LogEvent "==========================[ Bender has completed ]=========================="
+		LogEvent ""
+	fi
+}
+
+function RobotCloudStructure {
+	# Ensure the appropriate directories are in place to generate a log and alert.
+	mkdir -p /usr/local/robotcloud/{bin,data,logs}
+	# Ensure the log file is present.
+	if [ ! -e "$pathLog" ]; then
+		/usr/bin/touch "$pathLog"
+	fi
+	# Check to see if the destination backup folder was created.
+	# If not, default to boot drive.
+	if [ `echo "$pathBackups" | grep -c "Volumes"` -gt "0" ]; then
+		# Backup destination is on an external disk. Confirm it is mounted.
+		nameVolume=$(echo "$pathBackups" | sed -e 's#/Volumes/##g' | sed 's#/.*##')
+		if [ `diskutil list | grep -c "$nameVolume"` -gt "0" ]; then
+			backupDestination="$pathBackups/Bender Backups/$date"
+		fi
+	fi
+	/bin/mkdir -p "$backupDestination"
+}
+ 
+function CheckOS {
+	# Set the serveradmin variable according to operating system.
+	if [ "$macOS" -ge "108" ]; then
+		if [ "$macOS" -ge "109" ]; then
+			SOCKET="/Library/Server/ProfileManager/Config/var/PostgreSQL" 
+			WIKISOCKET="/Library/Server/Wiki/PostgresSocket" 
+			DATABASE=devicemgr_v2m0 
+			WIKIDATABASE=collab 
+		else
+			SOCKET="/Library/Server/PostgreSQL For Server Services/Socket"
+			WIKISOCKET="/Library/Server/PostgreSQL For Server Services/Socket" 
+			DATABASE=device_management
+			WIKIDATABASE=collab
+		fi
+		if [ -e /Applications/Server.app/Contents/ServerRoot/usr/sbin/serveradmin ]; then
+			serveradmin="/Applications/Server.app/Contents/ServerRoot/usr/sbin/serveradmin"
+			SERVERROOT="/Applications/Server.app/Contents/ServerRoot/usr/bin"
+			LogEvent "[ check ] The serveradmin binary has been found."
+		else
+			LogEvent "[ error ] The serveradmin binary could not be found. Exit Code: $?"
+		fi
+	elif [ -e /usr/sbin/serveradmin ]; then
+		serveradmin="/usr/sbin/serveradmin"
+		LogEvent "[ check ] The serveradmin binary has been found."
+	else
+		LogEvent "[ error ] The serveradmin binary could not be found. Exit Code: $?"
+	fi
+}
+ 
+function OpenDirectoryBackup {
+	# Check to see if Open Directory service is running.
+	odBackupDestinationStatus=$(sudo $serveradmin status dirserv | grep -c "RUNNING")
+	if [ $odBackupDestinationStatus = 1 ]; then
+		# Check to see if Open Directory is set to Master.
+		odmaster=$(sudo $serveradmin settings dirserv | grep "LDAPServerType" | grep -c "master")
+		if [ $odmaster = 1 ]; then
+			LogEvent "[ check ] Open Directory is running and is set to master."
+			# Ensure the backup directory is present and assign the path as a variable.
+			/bin/mkdir -p "$backupDestination"/OpenDirectory
+			# Instruct the serveradmin binary to create a backup.
+			$serveradmin command <<-EOC
+				dirserv:backupArchiveParams:archivePassword = $ldapPass
+				dirserv:backupArchiveParams:archivePath = ${backupDestination}/OpenDirectory/od_backup-${host}-${date}.sparseimage
+				dirserv:command = backupArchive
+ 
+				EOC
+			# Check to see if there were any errors backing up Open Directory.
+			if [ $? == 0 ]; then
+				LogEvent "[ backup ] Open Directory successfully backed up."
+			else
+				LogEvent "[ error ] There was an error attempting to back up Open Directory. Exit Code: $?"
+			fi
+		else
+			LogEvent "[ check ] Open Directory not set to master. No backup required."
+		fi
+	else
+		LogEvent "[ check ] Open Directory is not running. No backup required."
+	fi			
+}
+ 
+function ServerAdminBackup () {
+	# Ensure the backup directory is present and assign the path as a variable.
+	/bin/mkdir -p "$backupDestination"/ServerAdmin
+	# Create a backup of all services, regardless if they are running or not.
+	sudo $serveradmin settings all > "$backupDestination"/ServerAdmin/sa_backup-allservices-$host-$date.backup
+	list=$(sudo $serveradmin list)
+	for service in $list; do
+	 	sudo $serveradmin settings $service > "$backupDestination"/ServerAdmin/sa_backup-$service-$host-$date.backup
+		if [ $? == 0 ]; then
+			LogEvent "[ backup ] $service successfully backed up."
+		else
+			LogEvent "[ error ] Could not back up $service. Exit Code: $?"
+		fi
+	done
+}
+ 
+function ProfileManagerBackup () {
+	# Ensure the backup directory is present and assign the path as a variable.
+	/bin/mkdir -p "$backupDestination"/ProfileManager
+	# Create a backup of profilemanager database.
+	/Applications/Server.app/Contents/ServerRoot/usr/bin/pg_dump -h /Library/Server/ProfileManager/Config/var/PostgreSQL -U _devicemgr devicemgr_v2m0 -c -f "$backupDestination"/ProfileManager/device_management-$host-$date.sql
+	if [ $? == 0 ]; then
+		LogEvent "[ backup ] ProfileManager successfully backed up."
+	else
+		LogEvent "[ error ] Could not back up ProfileManager. Exit Code: $?"
+	fi
+}
+ 
+function WikiBackup () {
+	# Ensure the backup directory is present and assign the paths as variables.
+	mkdir -p "$backupDestination"/{WikiDB,WikiFiles}
+	# Cycle the Wiki service (needed occasionally in Server 5)
+	"$serveradmin" stop wiki
+	"$serveradmin" start wiki
+	# Create a backup of Wiki database.
+	sudo $SERVERROOT/pg_dump -v -h $WIKISOCKET --format=c --compress=9 --blobs --username=collab --file="$backupDestination"/WikiDB/collab-$host-$date.pgdump $WIKIDATABASE
+	if [ $? == 0 ]; then
+		LogEvent "[ backup ] Wiki Database successfully backed up."
+	else
+		LogEvent "[ error ] Could not back up Wiki Database. Exit Code: $?"
+	fi
+	# Create a backup of Wiki Files.
+	sudo rsync -axv /Library/Server/Wiki/FileData "$backupDestination"/WikiFiles/
+		if [ $? == 0 ]; then
+			LogEvent "[ backup ] Wiki Files successfully backed up."
+		else
+			LogEvent "[ error ] Could not back up Wiki Files. Exit Code: $?"
+		fi
+	sudo chown -R root:admin "$backupDestination"/WikiFiles/
+	sudo chmod -R 770 "$backupDestination"/WikiFiles/
+}
+
+function LogEvent () {
+	# Echo the passed event and then write it to the log.
+	echo $1
+	echo $(date "+%Y-%m-%d %H:%M:%S: ") ["bender"] $1 >> "$pathLog"
+}
+ 
+function RemoveOldBackups () {
+	# Remove backups that are older than 14 days.
+	LogEvent "[ maintenance ] Pruning files in $1 older than 14 days."
+	find "$pathBackups/Bender Backups" -mtime +$keepUntil -maxdepth 1 -exec rm -rf {} \;
+}
+ 
+##################################### FUNCTION CALL ##################################### 
+#########################################################################################
+ 
+CheckVersion
