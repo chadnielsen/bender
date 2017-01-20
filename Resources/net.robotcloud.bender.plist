@@ -6,7 +6,7 @@
 	<string>net.robotcloud.bender</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Library/Application Support/RobotCloud/Binaries/bender</string>
+		<string>/usr/local/robotcloud/bin/bender</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

@@ -10,13 +10,15 @@
 # 1.2 - Code improvements and added compatibility with OS X 10.9 Mavericks.
 # 2.0 - postgres backup for profilemanager added by Adrian Burgess
 # 2.1 - Added --version flag code.
+# 2.2 - Changed to straight serveradmin dump instead of xml.
+# 2.3 - Yosemite 10.10 compatibility.
 # https://gist.github.com/anotherspot/9145864
  
 ################################## VARIABLE DEFINITIONS ################################# 
 #########################################################################################
  
 host=$(hostname)
-macOS=$(sw_vers | awk '/ProductVersion/{print substr($2,1,4)}' | tr -d ".")
+macOS=$(sw_vers | awk '/ProductVersion/{print substr($2,1,5)}' | tr -d ".")
 macSN=$(system_profiler SPHardwareDataType | awk '/Serial Number/{print $4}')
 date=$(date +%Y-%m-%d-%H%M)
 pass=$(system_profiler SPHardwareDataType | awk '/Hardware UUID/{print $3}')
@@ -25,7 +27,7 @@ pipPath="/usr/local/robotcloud/bin/scroobiuspip"
 pipTitle="Bender Backup Error on: $macSN"
 backupDestination="/Backups/$date"
 keepUntil="14"
-version="2.1"
+version="2.3"
 versionCheck="$1"
  
 ##################################### SCRIPT BEGINS ##################################### 
@@ -65,6 +67,7 @@ function RobotCloudStructure {
  
 function CheckOS {
 	# Set the serveradmin variable according to operating system.
+	echo "$macOS"
 	if [ "$macOS" -ge "108" ]; then
 		if [ "$macOS" -ge "109" ]; then
 			SOCKET="/Library/Server/ProfileManager/Config/var/PostgreSQL" 
@@ -132,10 +135,10 @@ function ServerAdminBackup () {
 	# Ensure the backup directory is present and assign the path as a variable.
 	/bin/mkdir -p $backupDestination/ServerAdmin
 	# Create a backup of all services, regardless if they are running or not.
-	sudo $serveradmin settings all -x > $backupDestination/ServerAdmin/sa_backup-allservices-$host-$date.plist
+	sudo $serveradmin settings all > $backupDestination/ServerAdmin/sa_backup-allservices-$host-$date.backup
 	list=$(sudo $serveradmin list)
 	for service in $list; do
-	 	sudo $serveradmin settings $service -x > $backupDestination/ServerAdmin/sa_backup-$service-$host-$date.plist
+	 	sudo $serveradmin settings $service > $backupDestination/ServerAdmin/sa_backup-$service-$host-$date.backup
 		if [ $? == 0 ]; then
 			LogEvent "[ backup ] $service successfully backed up."
 		else
