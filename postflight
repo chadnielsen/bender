@@ -1,0 +1,14 @@
+#!/bin/sh
+
+sudo chown root:wheel /usr/local/robotcloud/bin/bender
+sudo chmod +x /usr/local/robotcloud/bin/bender
+sudo chown root:wheel /Library/LaunchDaemons/net.robotcloud.bender.plist
+sudo chmod 755 /Library/LaunchDaemons/net.robotcloud.bender.plist
+
+if [ "$(/bin/launchctl list | /usr/bin/grep net.robotcloud.bender)" != "" ]; then
+	sudo launchctl unload /Library/LaunchDaemons/net.robotcloud.bender.plist
+fi
+
+sudo launchctl load /Library/LaunchDaemons/net.robotcloud.bender.plist 
+
+exit 0
