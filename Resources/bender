@@ -11,12 +11,13 @@
 # 2.0 - postgres backup for profilemanager added by Adrian Burgess
 # 2.1 - Added --version flag code.
 # https://gist.github.com/anotherspot/9145864
+# 2.2 - make macOS version checking Yosemite compatible.
  
 ################################## VARIABLE DEFINITIONS ################################# 
 #########################################################################################
  
 host=$(hostname)
-macOS=$(sw_vers | awk '/ProductVersion/{print substr($2,1,4)}' | tr -d ".")
+macOS=$(sw_vers | awk '/ProductVersion/{print substr($2,1,5)}' | tr -d ".")
 macSN=$(system_profiler SPHardwareDataType | awk '/Serial Number/{print $4}')
 date=$(date +%Y-%m-%d-%H%M)
 pass=$(system_profiler SPHardwareDataType | awk '/Hardware UUID/{print $3}')
