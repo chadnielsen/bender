@@ -30,6 +30,8 @@ pathLog="/usr/local/robotcloud/logs/Bender.log"
 keepUntil="30"
 version="2.7"
 versionCheck="$1"
+profilemanagertime="$backupDestination/ProfileManager/device_management-$host-$date.sql"
+profilemanagerfile="$profilemanagertime"
  
 ##################################### SCRIPT BEGINS ##################################### 
 #########################################################################################
@@ -156,13 +158,19 @@ function ServerAdminBackup () {
 function ProfileManagerBackup () {
 	# Ensure the backup directory is present and assign the path as a variable.
 	/bin/mkdir -p "$backupDestination"/ProfileManager
+	# Create file with _devicemgr ownership
+	touch "$profilemanagerfile"
+	sudo chown _devicemgr:_devicemgr "$profilemanagerfile"
 	# Create a backup of profilemanager database.
-	/Applications/Server.app/Contents/ServerRoot/usr/bin/pg_dump -h /Library/Server/ProfileManager/Config/var/PostgreSQL -U _devicemgr devicemgr_v2m0 -c -f "$backupDestination"/ProfileManager/device_management-$host-$date.sql
+	sudo -u _devicemgr /Applications/Server.app/Contents/ServerRoot/usr/bin/pg_dump -h /Library/Server/ProfileManager/Config/var/PostgreSQL -U _devicemgr devicemgr_v2m0 -c -f "$profilemanagerfile"
 	if [ $? == 0 ]; then
 		LogEvent "[ backup ] ProfileManager successfully backed up."
 	else
 		LogEvent "[ error ] Could not back up ProfileManager. Exit Code: $?"
 	fi
+	#correct permissions to backup file
+	sudo chown root:wheel "$profilemanagerfile"
+	sudo chmod 755 "$profilemanagerfile"
 }
  
 function WikiBackup () {
